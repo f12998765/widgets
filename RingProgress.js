@@ -1,6 +1,6 @@
 /*!
  * RingProgress - 居中灵动圆环进度组件
- * @version 1.0.0
+ * @version 1.1.0
  * @license MIT
  *
  * 用法：
@@ -9,6 +9,12 @@
  *   rp.set(0.5);           // 手动设定进度 0~1
  *   rp.reset();            // 归零
  *   rp.destroy();          // 销毁
+ *
+ * 数字填充策略：
+ *   1. 自动判断调色板中哪些颜色是深色（相对亮度 < darkThreshold）
+ *   2. 深色数量 >= 2 时，用全部深色做渐变
+ *   3. 深色不足 2 个时，取亮度最低的 2 个色兜底
+ *   4. 数字外加白色细描边，保证白底可见
  */
 (function (root, factory) {
   if (typeof module === 'object' && module.exports) {
@@ -28,14 +34,16 @@
       '#ffadad', '#ffd6a5', '#fdffb6', '#caffbf',
       '#9bf6ff', '#a0c4ff', '#bdb2ff', '#ffc6ff'
     ],
-    size: 180,          // 组件显示尺寸(px)
-    radius: 38,         // 半径 (基于 100x100 viewBox)
-    stroke: 6,          // 线宽
-    duration: 2200,     // 动画时长(ms)
-    hold: 1400,         // 完成停留(ms)
-    autoStart: false,   // 创建后是否自动播放
-    onProgress: null,   // (p: 0~1) => void
-    onComplete: null    // () => void
+    size: 180,             // 组件显示尺寸(px)
+    radius: 38,            // 半径 (基于 100x100 viewBox)
+    stroke: 6,             // 线宽
+    duration: 2200,        // 动画时长(ms)
+    hold: 1400,            // 完成停留(ms)
+    autoStart: false,      // 创建后是否自动播放
+    darkThreshold: 0.5,    // 深色判断阈值（0~1，越大越宽松）
+    numStroke: 2.2,        // 数字白色描边宽度
+    onProgress: null,      // (p: 0~1) => void
+    onComplete: null       // () => void
   };
 
   /* ---------- 工具 ---------- */
@@ -49,6 +57,41 @@
     const e = document.createElementNS(SVG_NS, name);
     if (attrs) for (const k in attrs) e.setAttribute(k, attrs[k]);
     return e;
+  }
+
+  /* ---------- 颜色工具 ---------- */
+  function hexToRgb(hex) {
+    let h = hex.replace('#', '');
+    if (h.length === 3) h = h.split('').map(c => c + c).join('');
+    return [
+      parseInt(h.substr(0, 2), 16),
+      parseInt(h.substr(2, 2), 16),
+      parseInt(h.substr(4, 2), 16)
+    ];
+  }
+
+  /** YIQ 相对亮度 0~1 */
+  function luminance(hex) {
+    const [r, g, b] = hexToRgb(hex);
+    return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  }
+
+  function isDark(hex, threshold) {
+    return luminance(hex) < threshold;
+  }
+
+  /**
+   * 从调色板中挑出用于数字填充的颜色
+   *  - 全部深色（>=2 个）→ 全部使用
+   *  - 深色不足 2 个 → 按亮度升序取最深的 2 个
+   */
+  function pickNumberColors(palette, threshold) {
+    const dark = palette.filter(c => isDark(c, threshold));
+    if (dark.length >= 2) return dark;
+    return palette
+      .slice()
+      .sort((a, b) => luminance(a) - luminance(b))
+      .slice(0, 2);
   }
 
   /* ---------- 样式（只注入一次） ---------- */
@@ -82,6 +125,10 @@
       this.rafId = 0;
       this.timer = 0;
       this.id = 'grp-' + (++uid);
+
+      // 预先算好数字填充用色
+      this.numColors = pickNumberColors(this.cfg.palette, this.cfg.darkThreshold);
+
       this._build();
       if (this.cfg.autoStart) this.start();
     }
@@ -108,7 +155,7 @@
       const svg = el('svg', { viewBox: '0 0 100 100' });
       const defs = el('defs');
 
-      // 每段弧线
+      // 每段弧线：用原调色板
       const segments = [];
       const group = el('g', { filter: `url(#${id}-glow)` });
 
@@ -143,18 +190,23 @@
         segments.push(path);
       }
 
-      // 数字渐变（描边用）
+      // 数字渐变：只用自动挑出的深色组
       const numGrad = el('linearGradient', {
         id: `${id}-num`,
         gradientUnits: 'userSpaceOnUse',
         x1: '20', y1: '20', x2: '80', y2: '80'
       });
-      cfg.palette.forEach((c, i) => {
-        numGrad.appendChild(el('stop', {
-          offset: ((i / (segs - 1)) * 100).toFixed(2) + '%',
-          'stop-color': c
-        }));
-      });
+      if (this.numColors.length === 1) {
+        numGrad.appendChild(el('stop', { offset: '0%',   'stop-color': this.numColors[0] }));
+        numGrad.appendChild(el('stop', { offset: '100%', 'stop-color': this.numColors[0] }));
+      } else {
+        this.numColors.forEach((c, i) => {
+          numGrad.appendChild(el('stop', {
+            offset: ((i / (this.numColors.length - 1)) * 100).toFixed(2) + '%',
+            'stop-color': c
+          }));
+        });
+      }
       defs.appendChild(numGrad);
 
       // 大范围柔光滤镜
@@ -185,7 +237,7 @@
       sparkle.textContent = '✨';
       svg.appendChild(sparkle);
 
-      // 数字（白色填充 + 彩色描边）
+      // 数字通用属性
       const numAttrs = {
         x: '50', y: '51',
         'text-anchor': 'middle',
@@ -196,18 +248,23 @@
         'letter-spacing': '-1',
         'pointer-events': 'none'
       };
-      const numStroke = el('text', Object.assign({}, numAttrs, {
-        fill: `url(#${id}-num)`,
-        stroke: `url(#${id}-num)`,
-        'stroke-width': '2.6',
+
+      // 底层：白色描边（保证深色数字在白底上也有边界）
+      const numOutline = el('text', Object.assign({}, numAttrs, {
+        fill: 'none',
+        stroke: '#ffffff',
+        'stroke-width': String(cfg.numStroke),
         'stroke-linejoin': 'round'
       }));
-      numStroke.textContent = '0';
+      numOutline.textContent = '0';
 
-      const numFill = el('text', Object.assign({}, numAttrs, { fill: '#ffffff' }));
+      // 顶层：深色渐变填充
+      const numFill = el('text', Object.assign({}, numAttrs, {
+        fill: `url(#${id}-num)`
+      }));
       numFill.textContent = '0';
 
-      svg.appendChild(numStroke);
+      svg.appendChild(numOutline);
       svg.appendChild(numFill);
 
       btn.appendChild(svg);
@@ -218,7 +275,7 @@
       this.segments = segments;
       this.sparkle = sparkle;
       this.numFill = numFill;
-      this.numStroke = numStroke;
+      this.numOutline = numOutline;
       this.segCount = segs;
 
       btn.addEventListener('click', (e) => {
@@ -248,7 +305,7 @@
       // 中央数字
       const text = String(Math.round(p * 100));
       this.numFill.textContent = text;
-      this.numStroke.textContent = text;
+      this.numOutline.textContent = text;
 
       // ✨：0% 和 100% 时隐藏
       this.sparkle.style.display = (p > 0.001 && p < 0.999) ? '' : 'none';
@@ -312,7 +369,13 @@
       if (this.btn && this.btn.parentNode) {
         this.btn.parentNode.removeChild(this.btn);
       }
-      this.btn = this.segments = this.sparkle = this.numFill = this.numStroke = null;
+      this.btn = this.segments = this.sparkle =
+        this.numFill = this.numOutline = null;
+    }
+
+    /* -------- 查看当前用于数字填充的颜色（调试用） -------- */
+    getNumberColors() {
+      return this.numColors.slice();
     }
   }
 
